@@ -1,0 +1,831 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, CSSProperties, FormEvent } from 'react';
+import { DEFAULT_BOARDS, THEMES, createId, getTheme } from './data';
+import { imageFileToOptimizedDataUrl } from './imageTools';
+import {
+  BoardIcon,
+  DownloadIcon,
+  ImageIcon,
+  ImportIcon,
+  LinkIcon,
+  LockIcon,
+  PaletteIcon,
+  PlusIcon,
+  QuoteIcon,
+  SparkleIcon,
+  TrashIcon,
+  UploadIcon,
+  XIcon,
+} from './icons';
+import { normalizeBoards, readBoards, resetBoards, saveBoards } from './storage';
+import type { AddPinDraft, Board, Pin, PinType, ThemeId } from './types';
+import './styles.css';
+
+const pinOptions: Array<{ type: PinType; label: string; description: string }> = [
+  { type: 'image-url', label: 'Image URL', description: 'Paste a direct web image link.' },
+  { type: 'upload', label: 'Upload', description: 'Save an image from this device.' },
+  { type: 'quote', label: 'Quote', description: 'Add an affirmation or mantra.' },
+  { type: 'link', label: 'Link', description: 'Save a clickable URL.' },
+];
+
+const pinIcon = (type: PinType) => {
+  if (type === 'image-url') return <ImageIcon />;
+  if (type === 'upload') return <UploadIcon />;
+  if (type === 'quote') return <QuoteIcon />;
+  return <LinkIcon />;
+};
+
+const normalizeUrl = (rawValue: string, label = 'URL') => {
+  const trimmed = rawValue.trim();
+  if (!trimmed) throw new Error(`${label} is required.`);
+
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let parsed: URL;
+
+  try {
+    parsed = new URL(withProtocol);
+  } catch {
+    throw new Error(`Please enter a valid ${label.toLowerCase()}.`);
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error(`${label} must start with http:// or https://.`);
+  }
+
+  return parsed.href;
+};
+
+const formatHostname = (url: string) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+};
+
+const boardStyle = (themeId: ThemeId): CSSProperties => {
+  const theme = getTheme(themeId);
+  return {
+    '--theme-a': theme.accentA,
+    '--theme-b': theme.accentB,
+    '--theme-glow': theme.glow,
+    '--theme-contrast': theme.contrast,
+  } as CSSProperties;
+};
+
+const isThemeId = (value: string): value is ThemeId =>
+  THEMES.some((theme) => theme.id === value);
+
+const selectThemeId = (value: string): ThemeId => (isThemeId(value) ? value : 'aurora');
+
+const pinTypeLabel = (type: PinType) => pinOptions.find((option) => option.type === type)?.label ?? type;
+
+function App() {
+  const [boards, setBoards] = useState<Board[]>(() => readBoards());
+  const [activeBoardId, setActiveBoardId] = useState('board-vision');
+  const [isAddPinOpen, setIsAddPinOpen] = useState(false);
+  const [isNewBoardOpen, setIsNewBoardOpen] = useState(false);
+  const [saveState, setSaveState] = useState<'saved' | 'error'>('saved');
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const activeBoard = useMemo(
+    () => boards.find((board) => board.id === activeBoardId) ?? boards[0],
+    [activeBoardId, boards],
+  );
+
+  const totalPins = boards.reduce((sum, board) => sum + board.pins.length, 0);
+
+  useEffect(() => {
+    if (!activeBoard && boards[0]) {
+      setActiveBoardId(boards[0].id);
+      return;
+    }
+
+    if (activeBoard && activeBoard.id !== activeBoardId) {
+      setActiveBoardId(activeBoard.id);
+    }
+  }, [activeBoard, activeBoardId, boards]);
+
+  useEffect(() => {
+    try {
+      saveBoards(boards);
+      setSaveState('saved');
+    } catch {
+      setSaveState('error');
+    }
+  }, [boards]);
+
+  const updateBoard = (boardId: string, updater: (board: Board) => Board) => {
+    setBoards((currentBoards) =>
+      currentBoards.map((board) => (board.id === boardId ? updater(board) : board)),
+    );
+  };
+
+  const handleAddPin = (draft: AddPinDraft) => {
+    if (!activeBoard) return;
+
+    const base = {
+      id: createId('pin'),
+      caption: draft.caption.trim() || undefined,
+      createdAt: new Date().toISOString(),
+    };
+
+    let newPin: Pin;
+
+    if (draft.type === 'image-url') {
+      newPin = {
+        ...base,
+        type: 'image-url',
+        imageUrl: normalizeUrl(draft.imageUrl, 'Image URL'),
+        alt: draft.alt.trim() || undefined,
+      };
+    } else if (draft.type === 'upload') {
+      if (!draft.imageData) throw new Error('Choose an image to upload.');
+      newPin = {
+        ...base,
+        type: 'upload',
+        imageData: draft.imageData,
+        fileName: draft.fileName.trim() || undefined,
+        alt: draft.alt.trim() || undefined,
+      };
+    } else if (draft.type === 'quote') {
+      const quote = draft.quote.trim();
+      if (!quote) throw new Error('Quote text is required.');
+      newPin = {
+        ...base,
+        type: 'quote',
+        quote,
+        author: draft.author.trim() || undefined,
+        themeId: draft.themeId,
+      };
+    } else {
+      const previewImage = draft.previewImage.trim();
+      newPin = {
+        ...base,
+        type: 'link',
+        url: normalizeUrl(draft.url, 'Link URL'),
+        title: draft.title.trim() || formatHostname(draft.url),
+        previewImage: previewImage ? normalizeUrl(previewImage, 'Preview image URL') : undefined,
+      };
+    }
+
+    updateBoard(activeBoard.id, (board) => ({
+      ...board,
+      updatedAt: new Date().toISOString(),
+      pins: [newPin, ...board.pins],
+    }));
+  };
+
+  const handleDeletePin = (pinId: string) => {
+    if (!activeBoard) return;
+
+    updateBoard(activeBoard.id, (board) => ({
+      ...board,
+      updatedAt: new Date().toISOString(),
+      pins: board.pins.filter((pin) => pin.id !== pinId),
+    }));
+  };
+
+  const handleCreateBoard = (name: string, themeId: ThemeId) => {
+    const now = new Date().toISOString();
+    const board: Board = {
+      id: createId('board'),
+      name: name.trim() || 'Untitled board',
+      themeId,
+      pins: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setBoards((currentBoards) => [board, ...currentBoards]);
+    setActiveBoardId(board.id);
+  };
+
+  const handleUpdateBoardTheme = (themeId: ThemeId) => {
+    if (!activeBoard) return;
+
+    updateBoard(activeBoard.id, (board) => ({
+      ...board,
+      themeId,
+      updatedAt: new Date().toISOString(),
+    }));
+  };
+
+  const handleDeleteBoard = () => {
+    if (!activeBoard || boards.length <= 1) return;
+
+    const shouldDelete = window.confirm(`Delete “${activeBoard.name}” and all of its pins?`);
+    if (!shouldDelete) return;
+
+    setBoards((currentBoards) => currentBoards.filter((board) => board.id !== activeBoard.id));
+  };
+
+  const handleExport = () => {
+    const date = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([JSON.stringify(boards, null, 2)], { type: 'application/json' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = `glass-vision-board-${date}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(downloadUrl);
+  };
+
+  const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      const importedBoards = normalizeBoards(parsed);
+
+      if (!importedBoards) {
+        window.alert('That file does not look like a Glass Vision Board export.');
+        return;
+      }
+
+      const shouldReplace = window.confirm('Importing will replace the boards saved in this browser. Continue?');
+      if (!shouldReplace) return;
+
+      setBoards(importedBoards);
+      setActiveBoardId(importedBoards[0].id);
+    } catch {
+      window.alert('Could not import that JSON file.');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const handleRestoreStarters = () => {
+    const shouldRestore = window.confirm('Restore the starter boards? This replaces the boards saved in this browser.');
+    if (!shouldRestore) return;
+
+    resetBoards();
+    setBoards(DEFAULT_BOARDS);
+    setActiveBoardId(DEFAULT_BOARDS[0].id);
+  };
+
+  if (!activeBoard) {
+    return null;
+  }
+
+  return (
+    <main className="app-shell" style={boardStyle(activeBoard.themeId)}>
+      <div className="ambient ambient-one" />
+      <div className="ambient ambient-two" />
+      <div className="ambient ambient-three" />
+
+      <Sidebar
+        boards={boards}
+        activeBoardId={activeBoard.id}
+        onSelectBoard={setActiveBoardId}
+        onNewBoard={() => setIsNewBoardOpen(true)}
+        onExport={handleExport}
+        onImport={() => importInputRef.current?.click()}
+        onRestoreStarters={handleRestoreStarters}
+      />
+
+      <section className="workspace" aria-label={`${activeBoard.name} board`}>
+        <header className="hero glass-panel">
+          <div className="hero-copy">
+            <span className="eyebrow">
+              <SparkleIcon />
+              Local-first mood board
+            </span>
+            <h1>{activeBoard.name}</h1>
+            <p>
+              Collect images, uploads, affirmations, and link previews in a private board that saves in this browser.
+            </p>
+            <div className="status-row" aria-live="polite">
+              <span className="status-pill success">
+                <LockIcon />
+                {saveState === 'saved' ? 'Saved locally' : 'Storage needs attention'}
+              </span>
+              <span className="status-pill">
+                <BoardIcon />
+                {boards.length} {boards.length === 1 ? 'board' : 'boards'} · {totalPins} {totalPins === 1 ? 'pin' : 'pins'}
+              </span>
+            </div>
+            {saveState === 'error' ? (
+              <p className="storage-warning">
+                Your browser storage may be full. Export a backup, then remove large uploaded images.
+              </p>
+            ) : null}
+          </div>
+
+          <div className="hero-actions">
+            <ThemeSelect
+              id="active-board-theme"
+              label="Board theme"
+              value={activeBoard.themeId}
+              onChange={handleUpdateBoardTheme}
+              compact
+            />
+            <button className="primary-button" type="button" onClick={() => setIsAddPinOpen(true)}>
+              <PlusIcon />
+              Add pin
+            </button>
+            <button
+              className="ghost-button danger-subtle"
+              type="button"
+              onClick={handleDeleteBoard}
+              disabled={boards.length <= 1}
+              title={boards.length <= 1 ? 'Keep at least one board' : 'Delete board'}
+            >
+              <TrashIcon />
+              Delete board
+            </button>
+          </div>
+        </header>
+
+        {activeBoard.pins.length > 0 ? (
+          <section className="pin-grid" aria-label="Pins">
+            {activeBoard.pins.map((pin) => (
+              <PinCard key={pin.id} pin={pin} boardThemeId={activeBoard.themeId} onDelete={handleDeletePin} />
+            ))}
+          </section>
+        ) : (
+          <EmptyBoard onAddPin={() => setIsAddPinOpen(true)} />
+        )}
+      </section>
+
+      <input
+        ref={importInputRef}
+        className="sr-only"
+        type="file"
+        accept="application/json,.json"
+        onChange={handleImport}
+      />
+
+      {isAddPinOpen ? (
+        <AddPinModal activeThemeId={activeBoard.themeId} onAddPin={handleAddPin} onClose={() => setIsAddPinOpen(false)} />
+      ) : null}
+
+      {isNewBoardOpen ? <NewBoardModal onCreate={handleCreateBoard} onClose={() => setIsNewBoardOpen(false)} /> : null}
+    </main>
+  );
+}
+
+interface SidebarProps {
+  boards: Board[];
+  activeBoardId: string;
+  onSelectBoard: (boardId: string) => void;
+  onNewBoard: () => void;
+  onExport: () => void;
+  onImport: () => void;
+  onRestoreStarters: () => void;
+}
+
+function Sidebar({
+  boards,
+  activeBoardId,
+  onSelectBoard,
+  onNewBoard,
+  onExport,
+  onImport,
+  onRestoreStarters,
+}: SidebarProps) {
+  return (
+    <aside className="sidebar glass-panel" aria-label="Boards">
+      <div className="brand">
+        <div className="brand-mark">
+          <SparkleIcon />
+        </div>
+        <div>
+          <strong>Glass Boards</strong>
+          <span>Vision + mood</span>
+        </div>
+      </div>
+
+      <button className="primary-button full" type="button" onClick={onNewBoard}>
+        <PlusIcon />
+        New board
+      </button>
+
+      <nav className="board-list" aria-label="Board list">
+        {boards.map((board) => {
+          const theme = getTheme(board.themeId);
+          const isActive = board.id === activeBoardId;
+
+          return (
+            <button
+              key={board.id}
+              className={`board-item ${isActive ? 'active' : ''}`}
+              type="button"
+              style={boardStyle(board.themeId)}
+              onClick={() => onSelectBoard(board.id)}
+              aria-current={isActive ? 'page' : undefined}
+            >
+              <span className="board-swatch" aria-hidden="true" />
+              <span className="board-text">
+                <strong>{board.name}</strong>
+                <span>
+                  {theme.name} · {board.pins.length} {board.pins.length === 1 ? 'pin' : 'pins'}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="data-card">
+        <div>
+          <strong>Your data stays local</strong>
+          <p>Back up or move boards with JSON export/import.</p>
+        </div>
+        <div className="data-actions">
+          <button className="ghost-button" type="button" onClick={onExport}>
+            <DownloadIcon />
+            Export
+          </button>
+          <button className="ghost-button" type="button" onClick={onImport}>
+            <ImportIcon />
+            Import
+          </button>
+        </div>
+        <button className="text-button" type="button" onClick={onRestoreStarters}>
+          Restore starter boards
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+interface PinCardProps {
+  pin: Pin;
+  boardThemeId: ThemeId;
+  onDelete: (pinId: string) => void;
+}
+
+function PinCard({ pin, boardThemeId, onDelete }: PinCardProps) {
+  const quoteTheme = pin.type === 'quote' ? getTheme(pin.themeId) : getTheme(boardThemeId);
+  const contentStyle = {
+    '--pin-a': quoteTheme.accentA,
+    '--pin-b': quoteTheme.accentB,
+    '--pin-contrast': quoteTheme.contrast,
+  } as CSSProperties;
+
+  return (
+    <article className={`pin-card pin-card-${pin.type}`} style={contentStyle}>
+      <button className="pin-delete" type="button" onClick={() => onDelete(pin.id)} aria-label="Delete pin">
+        <TrashIcon />
+      </button>
+
+      {pin.type === 'image-url' ? (
+        <>
+          <img className="pin-image" src={pin.imageUrl} alt={pin.alt || pin.caption || 'Pinned image'} loading="lazy" />
+          <PinFooter pin={pin} />
+        </>
+      ) : null}
+
+      {pin.type === 'upload' ? (
+        <>
+          <img className="pin-image" src={pin.imageData} alt={pin.alt || pin.caption || pin.fileName || 'Uploaded image'} loading="lazy" />
+          <PinFooter pin={pin} />
+        </>
+      ) : null}
+
+      {pin.type === 'quote' ? (
+        <>
+          <div className="quote-pin">
+            <QuoteIcon />
+            <blockquote>{pin.quote}</blockquote>
+            {pin.author ? <cite>— {pin.author}</cite> : null}
+          </div>
+          <PinFooter pin={pin} />
+        </>
+      ) : null}
+
+      {pin.type === 'link' ? (
+        <>
+          <a className="link-pin" href={pin.url} target="_blank" rel="noreferrer">
+            {pin.previewImage ? (
+              <img src={pin.previewImage} alt="" loading="lazy" />
+            ) : (
+              <span className="link-placeholder">
+                <LinkIcon />
+              </span>
+            )}
+            <span className="link-content">
+              <span className="pin-type-label">Link</span>
+              <strong>{pin.title}</strong>
+              <span>{formatHostname(pin.url)}</span>
+            </span>
+          </a>
+          <PinFooter pin={pin} />
+        </>
+      ) : null}
+    </article>
+  );
+}
+
+function PinFooter({ pin }: { pin: Pin }) {
+  return (
+    <footer className="pin-footer">
+      <span>{pinTypeLabel(pin.type)}</span>
+      {pin.caption ? <p>{pin.caption}</p> : null}
+    </footer>
+  );
+}
+
+function EmptyBoard({ onAddPin }: { onAddPin: () => void }) {
+  return (
+    <section className="empty-state glass-panel">
+      <div className="empty-icon">
+        <ImageIcon />
+      </div>
+      <h2>This board is ready for your first pin.</h2>
+      <p>Add an image URL, upload a photo, write a quote, or save a link with a preview.</p>
+      <button className="primary-button" type="button" onClick={onAddPin}>
+        <PlusIcon />
+        Add pin
+      </button>
+    </section>
+  );
+}
+
+interface ThemeSelectProps {
+  id: string;
+  label: string;
+  value: ThemeId;
+  onChange: (themeId: ThemeId) => void;
+  helper?: string;
+  compact?: boolean;
+}
+
+function ThemeSelect({ id, label, value, onChange, helper, compact = false }: ThemeSelectProps) {
+  const selectedTheme = getTheme(value);
+
+  return (
+    <label className={`theme-select ${compact ? 'compact' : ''}`} style={boardStyle(value)} htmlFor={id}>
+      <span className="theme-select-label">
+        <PaletteIcon />
+        {label}
+      </span>
+      <span className="theme-select-control">
+        <span className="theme-select-swatch" aria-hidden="true" />
+        <select
+          id={id}
+          value={value}
+          onChange={(event) => onChange(selectThemeId(event.target.value))}
+          aria-label={label}
+        >
+          {THEMES.map((theme) => (
+            <option key={theme.id} value={theme.id}>
+              {theme.name}
+            </option>
+          ))}
+        </select>
+      </span>
+      {helper ? <small>{helper}</small> : null}
+      {compact ? <span className="sr-only">Current theme: {selectedTheme.name}</span> : null}
+    </label>
+  );
+}
+
+interface AddPinModalProps {
+  activeThemeId: ThemeId;
+  onAddPin: (draft: AddPinDraft) => void;
+  onClose: () => void;
+}
+
+function AddPinModal({ activeThemeId, onAddPin, onClose }: AddPinModalProps) {
+  const [type, setType] = useState<PinType>('image-url');
+  const [imageUrl, setImageUrl] = useState('');
+  const [imageAlt, setImageAlt] = useState('');
+  const [uploadData, setUploadData] = useState('');
+  const [uploadFileName, setUploadFileName] = useState('');
+  const [uploadAlt, setUploadAlt] = useState('');
+  const [quote, setQuote] = useState('');
+  const [quoteAuthor, setQuoteAuthor] = useState('');
+  const [quoteThemeId, setQuoteThemeId] = useState<ThemeId>(activeThemeId);
+  const [linkUrl, setLinkUrl] = useState('');
+  const [linkTitle, setLinkTitle] = useState('');
+  const [linkPreviewImage, setLinkPreviewImage] = useState('');
+  const [caption, setCaption] = useState('');
+  const [error, setError] = useState('');
+  const [uploadStatus, setUploadStatus] = useState('');
+
+  useEffect(() => {
+    setError('');
+  }, [type]);
+
+  const handleUploadChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setError('');
+      setUploadStatus('Optimizing image for local storage...');
+      const dataUrl = await imageFileToOptimizedDataUrl(file);
+      setUploadData(dataUrl);
+      setUploadFileName(file.name);
+      setUploadStatus('Image ready.');
+    } catch (uploadError) {
+      setUploadStatus('');
+      setError(uploadError instanceof Error ? uploadError.message : 'Could not upload this image.');
+    }
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    try {
+      if (type === 'image-url') {
+        onAddPin({ type, imageUrl, caption, alt: imageAlt });
+      } else if (type === 'upload') {
+        onAddPin({ type, imageData: uploadData, fileName: uploadFileName, caption, alt: uploadAlt });
+      } else if (type === 'quote') {
+        onAddPin({ type, quote, author: quoteAuthor, caption, themeId: quoteThemeId });
+      } else {
+        onAddPin({ type, url: linkUrl, title: linkTitle, previewImage: linkPreviewImage, caption });
+      }
+
+      onClose();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Please check your pin details.');
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="add-pin-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">Create pin</span>
+            <h2 id="add-pin-title">Add something inspiring</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close modal">
+            <XIcon />
+          </button>
+        </div>
+
+        <div className="pin-type-tabs" role="tablist" aria-label="Pin type">
+          {pinOptions.map((option) => (
+            <button
+              key={option.type}
+              type="button"
+              className={option.type === type ? 'active' : ''}
+              onClick={() => setType(option.type)}
+              aria-selected={option.type === type}
+            >
+              {pinIcon(option.type)}
+              <span>
+                <strong>{option.label}</strong>
+                <small>{option.description}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <form className="modal-form" onSubmit={handleSubmit}>
+          {type === 'image-url' ? (
+            <>
+              <label>
+                Image URL
+                <input value={imageUrl} onChange={(event) => setImageUrl(event.target.value)} placeholder="https://example.com/image.jpg" required />
+              </label>
+              <label>
+                Alt text
+                <input value={imageAlt} onChange={(event) => setImageAlt(event.target.value)} placeholder="Describe the image" />
+              </label>
+            </>
+          ) : null}
+
+          {type === 'upload' ? (
+            <>
+              <label className="upload-zone">
+                <UploadIcon />
+                <span>{uploadFileName || 'Choose an image from your device'}</span>
+                <small>Large images are resized before saving locally.</small>
+                <input type="file" accept="image/*" onChange={handleUploadChange} />
+              </label>
+              {uploadData ? <img className="upload-preview" src={uploadData} alt="Upload preview" /> : null}
+              {uploadStatus ? <p className="form-note">{uploadStatus}</p> : null}
+              <label>
+                Alt text
+                <input value={uploadAlt} onChange={(event) => setUploadAlt(event.target.value)} placeholder="Describe the uploaded image" />
+              </label>
+            </>
+          ) : null}
+
+          {type === 'quote' ? (
+            <>
+              <label>
+                Quote or affirmation
+                <textarea value={quote} onChange={(event) => setQuote(event.target.value)} placeholder="I am becoming the version of me I once dreamed about." required />
+              </label>
+              <label>
+                Author or label
+                <input value={quoteAuthor} onChange={(event) => setQuoteAuthor(event.target.value)} placeholder="Morning affirmation" />
+              </label>
+              <ThemeSelect
+                id="quote-theme"
+                label="Quote color"
+                value={quoteThemeId}
+                onChange={setQuoteThemeId}
+                helper="This controls the gradient used behind this quote pin."
+              />
+            </>
+          ) : null}
+
+          {type === 'link' ? (
+            <>
+              <label>
+                Link URL
+                <input value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} placeholder="https://example.com" required />
+              </label>
+              <label>
+                Title
+                <input value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Article, shop, playlist, resource..." required />
+              </label>
+              <label>
+                Optional preview image URL
+                <input value={linkPreviewImage} onChange={(event) => setLinkPreviewImage(event.target.value)} placeholder="https://example.com/preview.jpg" />
+              </label>
+            </>
+          ) : null}
+
+          <label>
+            Caption
+            <textarea value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Why this belongs on your board..." />
+          </label>
+
+          {error ? <p className="form-error" role="alert">{error}</p> : null}
+
+          <div className="modal-actions">
+            <button className="ghost-button" type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button className="primary-button" type="submit">
+              <PlusIcon />
+              Save pin
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+interface NewBoardModalProps {
+  onCreate: (name: string, themeId: ThemeId) => void;
+  onClose: () => void;
+}
+
+function NewBoardModal({ onCreate, onClose }: NewBoardModalProps) {
+  const [name, setName] = useState('');
+  const [themeId, setThemeId] = useState<ThemeId>('orchid');
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    onCreate(name, themeId);
+    onClose();
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="modal compact glass-panel" role="dialog" aria-modal="true" aria-labelledby="new-board-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">New board</span>
+            <h2 id="new-board-title">Name the next chapter</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close modal">
+            <XIcon />
+          </button>
+        </div>
+
+        <form className="modal-form" onSubmit={handleSubmit}>
+          <label>
+            Board name
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Home Sanctuary, Wellness, Style..." autoFocus required />
+          </label>
+
+          <ThemeSelect
+            id="new-board-theme"
+            label="Board color theme"
+            value={themeId}
+            onChange={setThemeId}
+            helper="This theme will tint the board glow, buttons, and board card."
+          />
+
+          <div className="modal-actions">
+            <button className="ghost-button" type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button className="primary-button" type="submit">
+              <PlusIcon />
+              Create board
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+export default App;
