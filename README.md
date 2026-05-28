@@ -5,16 +5,17 @@ A local-first, Pinterest-inspired vision board and mood board app built with Rea
 ## What it does
 
 - **Boards**: Includes three starter boards: Vision Board, Dream Travel, and Career Goals.
-- **Board themes**: Create unlimited boards, choose a color theme, and change an existing board theme from the board header dropdown.
+- **Board themes**: Create unlimited boards, choose a color theme, change an existing board theme from the board header dropdown, and star important boards so they sort to the top.
 - **Pins**: Add four pin types:
   - Image URL
   - Uploaded image from your device
   - Quote or affirmation
   - Link with title and optional preview image
-- **Manage pins**: Hover a pin to reveal the delete button. Link pins open in a new tab.
+- **Manage pins**: Pins use a left-to-right masonry layout. Hover a pin to reveal star, edit, drag, and delete actions. Link pins open in a new tab.
+- **Pin sorting**: Sort pins manually with drag and drop, by creation date, or by modification date. Starred pins always appear above the rest.
 - **Local-first storage**: Boards and pins save automatically in the browser with `localStorage`.
 - **User-controlled data**: Export all boards to JSON, import a backup JSON file, or restore the starter boards.
-- **Glassmorphism UI**: Colorful translucent panels, accessible labels, keyboard-friendly forms, and responsive layout.
+- **Glassmorphism UI**: Colorful translucent panels, accessible labels, keyboard-friendly forms, responsive layout, and a Norwester + Kollektif + Montserrat font pairing.
 
 ## Important local-storage notes
 
@@ -85,8 +86,7 @@ vision-board-app/
 
 ## Good next upgrades
 
-- Drag-and-drop pin ordering.
-- Edit existing pins and rename boards.
+- Rename boards.
 - Optional passphrase-based local encryption before saving to `localStorage`.
 - Optional PWA install/offline shell.
 - Optional cloud sync with a user-owned backend later, while keeping export/import.

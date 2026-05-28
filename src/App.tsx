@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, CSSProperties, FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, CSSProperties, DragEvent, FormEvent } from 'react';
 import { DEFAULT_BOARDS, THEMES, createId, getTheme } from './data';
 import { imageFileToOptimizedDataUrl } from './imageTools';
 import {
   BoardIcon,
   DownloadIcon,
+  DragHandleIcon,
+  EditIcon,
   ImageIcon,
   ImportIcon,
   LinkIcon,
@@ -12,13 +14,15 @@ import {
   PaletteIcon,
   PlusIcon,
   QuoteIcon,
+  SortIcon,
   SparkleIcon,
+  StarIcon,
   TrashIcon,
   UploadIcon,
   XIcon,
 } from './icons';
 import { normalizeBoards, readBoards, resetBoards, saveBoards } from './storage';
-import type { AddPinDraft, Board, Pin, PinType, ThemeId } from './types';
+import type { AddPinDraft, Board, Pin, PinSortMode, PinType, ThemeId } from './types';
 import './styles.css';
 
 const pinOptions: Array<{ type: PinType; label: string; description: string }> = [
@@ -26,6 +30,14 @@ const pinOptions: Array<{ type: PinType; label: string; description: string }> =
   { type: 'upload', label: 'Upload', description: 'Save an image from this device.' },
   { type: 'quote', label: 'Quote', description: 'Add an affirmation or mantra.' },
   { type: 'link', label: 'Link', description: 'Save a clickable URL.' },
+];
+
+const pinSortOptions: Array<{ mode: PinSortMode; label: string; description: string }> = [
+  { mode: 'manual', label: 'Manual arrangement', description: 'Drag and drop pins into your own order.' },
+  { mode: 'created-desc', label: 'Newest created first', description: 'Show recently added pins first.' },
+  { mode: 'created-asc', label: 'Oldest created first', description: 'Show earliest pins first.' },
+  { mode: 'updated-desc', label: 'Recently edited first', description: 'Show pins with the latest changes first.' },
+  { mode: 'updated-asc', label: 'Least recently edited first', description: 'Show pins with older changes first.' },
 ];
 
 const pinIcon = (type: PinType) => {
@@ -78,33 +90,165 @@ const isThemeId = (value: string): value is ThemeId =>
 
 const selectThemeId = (value: string): ThemeId => (isThemeId(value) ? value : 'aurora');
 
+const selectPinSortMode = (value: string): PinSortMode =>
+  pinSortOptions.some((option) => option.mode === value) ? (value as PinSortMode) : 'manual';
+
 const pinTypeLabel = (type: PinType) => pinOptions.find((option) => option.type === type)?.label ?? type;
+
+const pinSortLabel = (mode: PinSortMode) =>
+  pinSortOptions.find((option) => option.mode === mode)?.label ?? 'Manual arrangement';
+
+const getTime = (value: string) => {
+  const time = Date.parse(value);
+  return Number.isNaN(time) ? 0 : time;
+};
+
+const getSortedPins = (pins: Pin[], sortMode: PinSortMode) => {
+  const key: 'createdAt' | 'updatedAt' = sortMode.startsWith('created') ? 'createdAt' : 'updatedAt';
+  const direction = sortMode.endsWith('asc') ? 'asc' : 'desc';
+
+  return pins
+    .map((pin, index) => ({ pin, index }))
+    .sort((left, right) => {
+      const starDifference = Number(Boolean(right.pin.isStarred)) - Number(Boolean(left.pin.isStarred));
+      if (starDifference) return starDifference;
+
+      if (sortMode === 'manual') {
+        return left.index - right.index;
+      }
+
+      const leftTime = getTime(left.pin[key]);
+      const rightTime = getTime(right.pin[key]);
+      const dateDifference = direction === 'asc' ? leftTime - rightTime : rightTime - leftTime;
+
+      return dateDifference || left.index - right.index;
+    })
+    .map(({ pin }) => pin);
+};
+
+const movePinByIds = (
+  pins: Pin[],
+  sourceId: string,
+  targetId: string,
+  position: 'before' | 'after',
+) => {
+  if (sourceId === targetId) return pins;
+
+  const source = pins.find((pin) => pin.id === sourceId);
+  if (!source) return pins;
+
+  const withoutSource = pins.filter((pin) => pin.id !== sourceId);
+  const targetIndex = withoutSource.findIndex((pin) => pin.id === targetId);
+  if (targetIndex === -1) return pins;
+
+  const insertIndex = targetIndex + (position === 'after' ? 1 : 0);
+  const nextPins = [...withoutSource];
+  nextPins.splice(insertIndex, 0, source);
+  return nextPins;
+};
+
+const sortBoards = (boards: Board[]) =>
+  boards
+    .map((board, index) => ({ board, index }))
+    .sort((left, right) => {
+      const starDifference = Number(Boolean(right.board.isStarred)) - Number(Boolean(left.board.isStarred));
+      return starDifference || left.index - right.index;
+    })
+    .map(({ board }) => board);
+
+const buildPinFromDraft = (draft: AddPinDraft, existingPin?: Pin): Pin => {
+  const timestamp = new Date().toISOString();
+  const base = {
+    id: existingPin?.id ?? createId('pin'),
+    caption: draft.caption.trim() || undefined,
+    createdAt: existingPin?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    isStarred: existingPin?.isStarred ?? false,
+  };
+
+  if (draft.type === 'image-url') {
+    return {
+      ...base,
+      type: 'image-url',
+      imageUrl: normalizeUrl(draft.imageUrl, 'Image URL'),
+      alt: draft.alt.trim() || undefined,
+    };
+  }
+
+  if (draft.type === 'upload') {
+    if (!draft.imageData) throw new Error('Choose an image to upload.');
+
+    return {
+      ...base,
+      type: 'upload',
+      imageData: draft.imageData,
+      fileName: draft.fileName.trim() || undefined,
+      alt: draft.alt.trim() || undefined,
+    };
+  }
+
+  if (draft.type === 'quote') {
+    const quote = draft.quote.trim();
+    if (!quote) throw new Error('Quote text is required.');
+
+    return {
+      ...base,
+      type: 'quote',
+      quote,
+      author: draft.author.trim() || undefined,
+      themeId: draft.themeId,
+    };
+  }
+
+  const url = normalizeUrl(draft.url, 'Link URL');
+  const previewImage = draft.previewImage.trim();
+
+  return {
+    ...base,
+    type: 'link',
+    url,
+    title: draft.title.trim() || formatHostname(url),
+    previewImage: previewImage ? normalizeUrl(previewImage, 'Preview image URL') : undefined,
+  };
+};
 
 function App() {
   const [boards, setBoards] = useState<Board[]>(() => readBoards());
   const [activeBoardId, setActiveBoardId] = useState('board-vision');
   const [isAddPinOpen, setIsAddPinOpen] = useState(false);
+  const [editingPin, setEditingPin] = useState<Pin | null>(null);
   const [isNewBoardOpen, setIsNewBoardOpen] = useState(false);
   const [saveState, setSaveState] = useState<'saved' | 'error'>('saved');
+  const [draggingPinId, setDraggingPinId] = useState<string | null>(null);
+  const [dragOverPin, setDragOverPin] = useState<{ pinId: string; position: 'before' | 'after' } | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
+  const sortedBoards = useMemo(() => sortBoards(boards), [boards]);
+
   const activeBoard = useMemo(
-    () => boards.find((board) => board.id === activeBoardId) ?? boards[0],
-    [activeBoardId, boards],
+    () => boards.find((board) => board.id === activeBoardId) ?? sortedBoards[0] ?? boards[0],
+    [activeBoardId, boards, sortedBoards],
+  );
+
+  const activePins = useMemo(
+    () => getSortedPins(activeBoard?.pins ?? [], activeBoard?.pinSortMode ?? 'manual'),
+    [activeBoard?.pins, activeBoard?.pinSortMode],
   );
 
   const totalPins = boards.reduce((sum, board) => sum + board.pins.length, 0);
+  const starredPinCount = activeBoard.pins.filter((pin) => pin.isStarred).length;
+  const isManualSorting = activeBoard.pinSortMode === 'manual';
 
   useEffect(() => {
-    if (!activeBoard && boards[0]) {
-      setActiveBoardId(boards[0].id);
+    if (!activeBoard && sortedBoards[0]) {
+      setActiveBoardId(sortedBoards[0].id);
       return;
     }
 
     if (activeBoard && activeBoard.id !== activeBoardId) {
       setActiveBoardId(activeBoard.id);
     }
-  }, [activeBoard, activeBoardId, boards]);
+  }, [activeBoard, activeBoardId, sortedBoards]);
 
   useEffect(() => {
     try {
@@ -124,55 +268,41 @@ function App() {
   const handleAddPin = (draft: AddPinDraft) => {
     if (!activeBoard) return;
 
-    const base = {
-      id: createId('pin'),
-      caption: draft.caption.trim() || undefined,
-      createdAt: new Date().toISOString(),
-    };
-
-    let newPin: Pin;
-
-    if (draft.type === 'image-url') {
-      newPin = {
-        ...base,
-        type: 'image-url',
-        imageUrl: normalizeUrl(draft.imageUrl, 'Image URL'),
-        alt: draft.alt.trim() || undefined,
-      };
-    } else if (draft.type === 'upload') {
-      if (!draft.imageData) throw new Error('Choose an image to upload.');
-      newPin = {
-        ...base,
-        type: 'upload',
-        imageData: draft.imageData,
-        fileName: draft.fileName.trim() || undefined,
-        alt: draft.alt.trim() || undefined,
-      };
-    } else if (draft.type === 'quote') {
-      const quote = draft.quote.trim();
-      if (!quote) throw new Error('Quote text is required.');
-      newPin = {
-        ...base,
-        type: 'quote',
-        quote,
-        author: draft.author.trim() || undefined,
-        themeId: draft.themeId,
-      };
-    } else {
-      const previewImage = draft.previewImage.trim();
-      newPin = {
-        ...base,
-        type: 'link',
-        url: normalizeUrl(draft.url, 'Link URL'),
-        title: draft.title.trim() || formatHostname(draft.url),
-        previewImage: previewImage ? normalizeUrl(previewImage, 'Preview image URL') : undefined,
-      };
-    }
+    const newPin = buildPinFromDraft(draft);
 
     updateBoard(activeBoard.id, (board) => ({
       ...board,
       updatedAt: new Date().toISOString(),
-      pins: [newPin, ...board.pins],
+      pins: [...board.pins, newPin],
+    }));
+  };
+
+  const handleUpdatePin = (pinId: string, draft: AddPinDraft) => {
+    if (!activeBoard) return;
+
+    const currentPin = activeBoard.pins.find((pin) => pin.id === pinId);
+    if (!currentPin) throw new Error('Could not find that pin.');
+
+    const updatedPin = buildPinFromDraft(draft, currentPin);
+
+    updateBoard(activeBoard.id, (board) => ({
+      ...board,
+      updatedAt: new Date().toISOString(),
+      pins: board.pins.map((pin) => (pin.id === pinId ? updatedPin : pin)),
+    }));
+  };
+
+  const handleTogglePinStar = (pinId: string) => {
+    if (!activeBoard) return;
+
+    const timestamp = new Date().toISOString();
+
+    updateBoard(activeBoard.id, (board) => ({
+      ...board,
+      updatedAt: timestamp,
+      pins: board.pins.map((pin) =>
+        pin.id === pinId ? { ...pin, isStarred: !pin.isStarred, updatedAt: timestamp } : pin,
+      ),
     }));
   };
 
@@ -193,6 +323,8 @@ function App() {
       name: name.trim() || 'Untitled board',
       themeId,
       pins: [],
+      isStarred: false,
+      pinSortMode: 'manual',
       createdAt: now,
       updatedAt: now,
     };
@@ -211,10 +343,84 @@ function App() {
     }));
   };
 
+  const handleUpdatePinSort = (pinSortMode: PinSortMode) => {
+    if (!activeBoard) return;
+
+    setDraggingPinId(null);
+    setDragOverPin(null);
+    updateBoard(activeBoard.id, (board) => ({
+      ...board,
+      pinSortMode,
+      updatedAt: new Date().toISOString(),
+    }));
+  };
+
+  const handleToggleBoardStar = (boardId: string) => {
+    updateBoard(boardId, (board) => ({
+      ...board,
+      isStarred: !board.isStarred,
+      updatedAt: new Date().toISOString(),
+    }));
+  };
+
+  const handlePinDragStart = (pinId: string, event: DragEvent<HTMLElement>) => {
+    if (!isManualSorting) return;
+
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', pinId);
+    setDraggingPinId(pinId);
+  };
+
+  const handlePinDragOver = (pinId: string, event: DragEvent<HTMLElement>) => {
+    if (!isManualSorting || !draggingPinId || draggingPinId === pinId) return;
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY > rect.top + rect.height / 2 ? 'after' : 'before';
+
+    setDragOverPin((current) =>
+      current?.pinId === pinId && current.position === position ? current : { pinId, position },
+    );
+  };
+
+  const handlePinDrop = (targetId: string, event: DragEvent<HTMLElement>) => {
+    if (!isManualSorting || !draggingPinId || !activeBoard) return;
+
+    event.preventDefault();
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = dragOverPin?.pinId === targetId
+      ? dragOverPin.position
+      : event.clientY > rect.top + rect.height / 2
+        ? 'after'
+        : 'before';
+
+    updateBoard(activeBoard.id, (board) => {
+      const displayPins = getSortedPins(board.pins, 'manual');
+      const reorderedPins = movePinByIds(displayPins, draggingPinId, targetId, position);
+
+      return {
+        ...board,
+        pins: reorderedPins,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    setDraggingPinId(null);
+    setDragOverPin(null);
+  };
+
+  const handlePinDragEnd = () => {
+    setDraggingPinId(null);
+    setDragOverPin(null);
+  };
+
   const handleDeleteBoard = () => {
     if (!activeBoard || boards.length <= 1) return;
 
-    const shouldDelete = window.confirm(`Delete “${activeBoard.name}” and all of its pins?`);
+    const shouldDelete = window.confirm(`Delete "${activeBoard.name}" and all of its pins?`);
     if (!shouldDelete) return;
 
     setBoards((currentBoards) => currentBoards.filter((board) => board.id !== activeBoard.id));
@@ -251,7 +457,7 @@ function App() {
       if (!shouldReplace) return;
 
       setBoards(importedBoards);
-      setActiveBoardId(importedBoards[0].id);
+      setActiveBoardId(sortBoards(importedBoards)[0].id);
     } catch {
       window.alert('Could not import that JSON file.');
     } finally {
@@ -279,9 +485,10 @@ function App() {
       <div className="ambient ambient-three" />
 
       <Sidebar
-        boards={boards}
+        boards={sortedBoards}
         activeBoardId={activeBoard.id}
         onSelectBoard={setActiveBoardId}
+        onToggleBoardStar={handleToggleBoardStar}
         onNewBoard={() => setIsNewBoardOpen(true)}
         onExport={handleExport}
         onImport={() => importInputRef.current?.click()}
@@ -306,7 +513,7 @@ function App() {
               </span>
               <span className="status-pill">
                 <BoardIcon />
-                {boards.length} {boards.length === 1 ? 'board' : 'boards'} · {totalPins} {totalPins === 1 ? 'pin' : 'pins'}
+                {boards.length} {boards.length === 1 ? 'board' : 'boards'} - {totalPins} {totalPins === 1 ? 'pin' : 'pins'}
               </span>
             </div>
             {saveState === 'error' ? (
@@ -324,6 +531,15 @@ function App() {
               onChange={handleUpdateBoardTheme}
               compact
             />
+            <button
+              className={`ghost-button star-toggle ${activeBoard.isStarred ? 'active' : ''}`}
+              type="button"
+              onClick={() => handleToggleBoardStar(activeBoard.id)}
+              aria-pressed={Boolean(activeBoard.isStarred)}
+            >
+              <StarIcon />
+              {activeBoard.isStarred ? 'Important' : 'Mark important'}
+            </button>
             <button className="primary-button" type="button" onClick={() => setIsAddPinOpen(true)}>
               <PlusIcon />
               Add pin
@@ -342,11 +558,34 @@ function App() {
         </header>
 
         {activeBoard.pins.length > 0 ? (
-          <section className="pin-grid" aria-label="Pins">
-            {activeBoard.pins.map((pin) => (
-              <PinCard key={pin.id} pin={pin} boardThemeId={activeBoard.themeId} onDelete={handleDeletePin} />
-            ))}
-          </section>
+          <>
+            <PinToolbar
+              sortMode={activeBoard.pinSortMode}
+              pinCount={activeBoard.pins.length}
+              starredCount={starredPinCount}
+              onSortChange={handleUpdatePinSort}
+            />
+
+            <section className={`pin-grid ${isManualSorting ? 'manual-sorting' : ''}`} aria-label="Pins">
+              {activePins.map((pin) => (
+                <PinCard
+                  key={pin.id}
+                  pin={pin}
+                  boardThemeId={activeBoard.themeId}
+                  isManualSorting={isManualSorting}
+                  isDragging={draggingPinId === pin.id}
+                  dropPosition={dragOverPin?.pinId === pin.id ? dragOverPin.position : null}
+                  onEdit={setEditingPin}
+                  onDelete={handleDeletePin}
+                  onToggleStar={handleTogglePinStar}
+                  onDragStart={handlePinDragStart}
+                  onDragOver={handlePinDragOver}
+                  onDrop={handlePinDrop}
+                  onDragEnd={handlePinDragEnd}
+                />
+              ))}
+            </section>
+          </>
         ) : (
           <EmptyBoard onAddPin={() => setIsAddPinOpen(true)} />
         )}
@@ -361,7 +600,19 @@ function App() {
       />
 
       {isAddPinOpen ? (
-        <AddPinModal activeThemeId={activeBoard.themeId} onAddPin={handleAddPin} onClose={() => setIsAddPinOpen(false)} />
+        <PinModal activeThemeId={activeBoard.themeId} onSave={handleAddPin} onClose={() => setIsAddPinOpen(false)} />
+      ) : null}
+
+      {editingPin ? (
+        <PinModal
+          activeThemeId={activeBoard.themeId}
+          initialPin={editingPin}
+          onSave={(draft) => {
+            handleUpdatePin(editingPin.id, draft);
+            setEditingPin(null);
+          }}
+          onClose={() => setEditingPin(null)}
+        />
       ) : null}
 
       {isNewBoardOpen ? <NewBoardModal onCreate={handleCreateBoard} onClose={() => setIsNewBoardOpen(false)} /> : null}
@@ -373,6 +624,7 @@ interface SidebarProps {
   boards: Board[];
   activeBoardId: string;
   onSelectBoard: (boardId: string) => void;
+  onToggleBoardStar: (boardId: string) => void;
   onNewBoard: () => void;
   onExport: () => void;
   onImport: () => void;
@@ -383,6 +635,7 @@ function Sidebar({
   boards,
   activeBoardId,
   onSelectBoard,
+  onToggleBoardStar,
   onNewBoard,
   onExport,
   onImport,
@@ -411,31 +664,47 @@ function Sidebar({
           const isActive = board.id === activeBoardId;
 
           return (
-            <button
-              key={board.id}
-              className={`board-item ${isActive ? 'active' : ''}`}
-              type="button"
-              style={boardStyle(board.themeId)}
-              onClick={() => onSelectBoard(board.id)}
-              aria-current={isActive ? 'page' : undefined}
-            >
-              <span className="board-swatch" aria-hidden="true" />
-              <span className="board-text">
-                <strong>{board.name}</strong>
-                <span>
-                  {theme.name} · {board.pins.length} {board.pins.length === 1 ? 'pin' : 'pins'}
+            <div key={board.id} className={`board-row ${isActive ? 'active' : ''}`} style={boardStyle(board.themeId)}>
+              <button
+                className="board-item"
+                type="button"
+                onClick={() => onSelectBoard(board.id)}
+                aria-current={isActive ? 'page' : undefined}
+              >
+                <span className="board-swatch" aria-hidden="true" />
+                <span className="board-text">
+                  <strong>{board.name}</strong>
+                  <span>
+                    {board.isStarred ? 'Important - ' : ''}{theme.name} - {board.pins.length} {board.pins.length === 1 ? 'pin' : 'pins'}
+                  </span>
                 </span>
-              </span>
-            </button>
+              </button>
+              <button
+                className={`board-star-button ${board.isStarred ? 'active' : ''}`}
+                type="button"
+                onClick={() => onToggleBoardStar(board.id)}
+                aria-label={board.isStarred ? `Unmark ${board.name} as important` : `Mark ${board.name} as important`}
+                aria-pressed={Boolean(board.isStarred)}
+                title={board.isStarred ? 'Important board' : 'Mark important'}
+              >
+                <StarIcon />
+              </button>
+            </div>
           );
         })}
       </nav>
 
-      <div className="data-card">
-        <div>
-          <strong>Your data stays local</strong>
-          <p>Back up or move boards with JSON export/import.</p>
-        </div>
+      <details className="data-card">
+        <summary>
+          <span className="data-summary-icon" aria-hidden="true">
+            <LockIcon />
+          </span>
+          <span>
+            <strong>Your data stays local</strong>
+            <small>Backup tools</small>
+          </span>
+        </summary>
+        <p>Back up or move boards with JSON export/import.</p>
         <div className="data-actions">
           <button className="ghost-button" type="button" onClick={onExport}>
             <DownloadIcon />
@@ -449,18 +718,86 @@ function Sidebar({
         <button className="text-button" type="button" onClick={onRestoreStarters}>
           Restore starter boards
         </button>
-      </div>
+      </details>
     </aside>
+  );
+}
+
+interface PinToolbarProps {
+  sortMode: PinSortMode;
+  pinCount: number;
+  starredCount: number;
+  onSortChange: (mode: PinSortMode) => void;
+}
+
+function PinToolbar({ sortMode, pinCount, starredCount, onSortChange }: PinToolbarProps) {
+  const selectedOption = pinSortOptions.find((option) => option.mode === sortMode) ?? pinSortOptions[0];
+
+  return (
+    <section className="pin-toolbar glass-panel" aria-label="Pin sorting controls">
+      <div className="pin-toolbar-copy">
+        <span className="eyebrow">
+          <SortIcon />
+          Pin order
+        </span>
+        <strong>{selectedOption.label}</strong>
+        <p>{sortMode === 'manual' ? 'Drag cards to arrange them. Starred pins always stay above the rest.' : selectedOption.description}</p>
+      </div>
+
+      <div className="pin-toolbar-controls">
+        <label className="sort-select" htmlFor="pin-sort-mode">
+          <span>Sort pins</span>
+          <select
+            id="pin-sort-mode"
+            value={sortMode}
+            onChange={(event) => onSortChange(selectPinSortMode(event.target.value))}
+          >
+            {pinSortOptions.map((option) => (
+              <option key={option.mode} value={option.mode}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="toolbar-stat">
+          <StarIcon />
+          {starredCount} starred / {pinCount} total
+        </span>
+      </div>
+    </section>
   );
 }
 
 interface PinCardProps {
   pin: Pin;
   boardThemeId: ThemeId;
+  isManualSorting: boolean;
+  isDragging: boolean;
+  dropPosition: 'before' | 'after' | null;
+  onEdit: (pin: Pin) => void;
   onDelete: (pinId: string) => void;
+  onToggleStar: (pinId: string) => void;
+  onDragStart: (pinId: string, event: DragEvent<HTMLElement>) => void;
+  onDragOver: (pinId: string, event: DragEvent<HTMLElement>) => void;
+  onDrop: (pinId: string, event: DragEvent<HTMLElement>) => void;
+  onDragEnd: () => void;
 }
 
-function PinCard({ pin, boardThemeId, onDelete }: PinCardProps) {
+function PinCard({
+  pin,
+  boardThemeId,
+  isManualSorting,
+  isDragging,
+  dropPosition,
+  onEdit,
+  onDelete,
+  onToggleStar,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+}: PinCardProps) {
+  const cardRef = useRef<HTMLElement | null>(null);
   const quoteTheme = pin.type === 'quote' ? getTheme(pin.themeId) : getTheme(boardThemeId);
   const contentStyle = {
     '--pin-a': quoteTheme.accentA,
@@ -468,22 +805,91 @@ function PinCard({ pin, boardThemeId, onDelete }: PinCardProps) {
     '--pin-contrast': quoteTheme.contrast,
   } as CSSProperties;
 
+  const syncMasonrySpan = useCallback(() => {
+    const card = cardRef.current;
+    const grid = card?.parentElement;
+    if (!card || !grid) return;
+
+    const gridStyles = window.getComputedStyle(grid);
+    const rowHeight = Number.parseInt(gridStyles.getPropertyValue('grid-auto-rows'), 10) || 8;
+    const rowGap = Number.parseInt(gridStyles.getPropertyValue('row-gap'), 10) || 16;
+    const cardHeight = card.getBoundingClientRect().height;
+    const span = Math.max(1, Math.ceil((cardHeight + rowGap) / (rowHeight + rowGap)));
+
+    card.style.setProperty('--row-span', span.toString());
+  }, []);
+
+  useEffect(() => {
+    const card = cardRef.current;
+    if (!card) return;
+
+    syncMasonrySpan();
+
+    const resizeObserver = new ResizeObserver(syncMasonrySpan);
+    resizeObserver.observe(card);
+    window.addEventListener('resize', syncMasonrySpan);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', syncMasonrySpan);
+    };
+  }, [pin, syncMasonrySpan]);
+
+  const handleMediaLoaded = () => {
+    window.requestAnimationFrame(syncMasonrySpan);
+  };
+
   return (
-    <article className={`pin-card pin-card-${pin.type}`} style={contentStyle}>
-      <button className="pin-delete" type="button" onClick={() => onDelete(pin.id)} aria-label="Delete pin">
-        <TrashIcon />
-      </button>
+    <article
+      ref={cardRef}
+      className={`pin-card pin-card-${pin.type} ${pin.isStarred ? 'starred' : ''} ${isManualSorting ? 'draggable' : ''} ${isDragging ? 'dragging' : ''} ${dropPosition ? `drop-${dropPosition}` : ''}`}
+      style={contentStyle}
+      draggable={isManualSorting}
+      onDragStart={(event) => onDragStart(pin.id, event)}
+      onDragOver={(event) => onDragOver(pin.id, event)}
+      onDrop={(event) => onDrop(pin.id, event)}
+      onDragEnd={onDragEnd}
+    >
+      <div className="pin-actions">
+        {isManualSorting ? (
+          <span className="pin-drag-handle" title="Drag to arrange" aria-label="Drag to arrange">
+            <DragHandleIcon />
+          </span>
+        ) : null}
+        <button
+          className={`pin-action star ${pin.isStarred ? 'active' : ''}`}
+          type="button"
+          onClick={() => onToggleStar(pin.id)}
+          aria-label={pin.isStarred ? 'Unstar pin' : 'Star pin'}
+          aria-pressed={Boolean(pin.isStarred)}
+        >
+          <StarIcon />
+        </button>
+        <button className="pin-action" type="button" onClick={() => onEdit(pin)} aria-label="Edit pin">
+          <EditIcon />
+        </button>
+        <button className="pin-action danger" type="button" onClick={() => onDelete(pin.id)} aria-label="Delete pin">
+          <TrashIcon />
+        </button>
+      </div>
+
+      {pin.isStarred ? (
+        <span className="pin-star-badge">
+          <StarIcon />
+          Starred
+        </span>
+      ) : null}
 
       {pin.type === 'image-url' ? (
         <>
-          <img className="pin-image" src={pin.imageUrl} alt={pin.alt || pin.caption || 'Pinned image'} loading="lazy" />
+          <img className="pin-image" src={pin.imageUrl} alt={pin.alt || pin.caption || 'Pinned image'} loading="lazy" onLoad={handleMediaLoaded} onError={handleMediaLoaded} />
           <PinFooter pin={pin} />
         </>
       ) : null}
 
       {pin.type === 'upload' ? (
         <>
-          <img className="pin-image" src={pin.imageData} alt={pin.alt || pin.caption || pin.fileName || 'Uploaded image'} loading="lazy" />
+          <img className="pin-image" src={pin.imageData} alt={pin.alt || pin.caption || pin.fileName || 'Uploaded image'} loading="lazy" onLoad={handleMediaLoaded} onError={handleMediaLoaded} />
           <PinFooter pin={pin} />
         </>
       ) : null}
@@ -493,7 +899,7 @@ function PinCard({ pin, boardThemeId, onDelete }: PinCardProps) {
           <div className="quote-pin">
             <QuoteIcon />
             <blockquote>{pin.quote}</blockquote>
-            {pin.author ? <cite>— {pin.author}</cite> : null}
+            {pin.author ? <cite>- {pin.author}</cite> : null}
           </div>
           <PinFooter pin={pin} />
         </>
@@ -503,7 +909,7 @@ function PinCard({ pin, boardThemeId, onDelete }: PinCardProps) {
         <>
           <a className="link-pin" href={pin.url} target="_blank" rel="noreferrer">
             {pin.previewImage ? (
-              <img src={pin.previewImage} alt="" loading="lazy" />
+              <img src={pin.previewImage} alt="" loading="lazy" onLoad={handleMediaLoaded} onError={handleMediaLoaded} />
             ) : (
               <span className="link-placeholder">
                 <LinkIcon />
@@ -525,7 +931,7 @@ function PinCard({ pin, boardThemeId, onDelete }: PinCardProps) {
 function PinFooter({ pin }: { pin: Pin }) {
   return (
     <footer className="pin-footer">
-      <span>{pinTypeLabel(pin.type)}</span>
+      <span>{pin.isStarred ? `Starred - ${pinTypeLabel(pin.type)}` : pinTypeLabel(pin.type)}</span>
       {pin.caption ? <p>{pin.caption}</p> : null}
     </footer>
   );
@@ -586,26 +992,28 @@ function ThemeSelect({ id, label, value, onChange, helper, compact = false }: Th
   );
 }
 
-interface AddPinModalProps {
+interface PinModalProps {
   activeThemeId: ThemeId;
-  onAddPin: (draft: AddPinDraft) => void;
+  initialPin?: Pin;
+  onSave: (draft: AddPinDraft) => void;
   onClose: () => void;
 }
 
-function AddPinModal({ activeThemeId, onAddPin, onClose }: AddPinModalProps) {
-  const [type, setType] = useState<PinType>('image-url');
-  const [imageUrl, setImageUrl] = useState('');
-  const [imageAlt, setImageAlt] = useState('');
-  const [uploadData, setUploadData] = useState('');
-  const [uploadFileName, setUploadFileName] = useState('');
-  const [uploadAlt, setUploadAlt] = useState('');
-  const [quote, setQuote] = useState('');
-  const [quoteAuthor, setQuoteAuthor] = useState('');
-  const [quoteThemeId, setQuoteThemeId] = useState<ThemeId>(activeThemeId);
-  const [linkUrl, setLinkUrl] = useState('');
-  const [linkTitle, setLinkTitle] = useState('');
-  const [linkPreviewImage, setLinkPreviewImage] = useState('');
-  const [caption, setCaption] = useState('');
+function PinModal({ activeThemeId, initialPin, onSave, onClose }: PinModalProps) {
+  const isEditing = Boolean(initialPin);
+  const [type, setType] = useState<PinType>(initialPin?.type ?? 'image-url');
+  const [imageUrl, setImageUrl] = useState(initialPin?.type === 'image-url' ? initialPin.imageUrl : '');
+  const [imageAlt, setImageAlt] = useState(initialPin?.type === 'image-url' ? initialPin.alt ?? '' : '');
+  const [uploadData, setUploadData] = useState(initialPin?.type === 'upload' ? initialPin.imageData : '');
+  const [uploadFileName, setUploadFileName] = useState(initialPin?.type === 'upload' ? initialPin.fileName ?? '' : '');
+  const [uploadAlt, setUploadAlt] = useState(initialPin?.type === 'upload' ? initialPin.alt ?? '' : '');
+  const [quote, setQuote] = useState(initialPin?.type === 'quote' ? initialPin.quote : '');
+  const [quoteAuthor, setQuoteAuthor] = useState(initialPin?.type === 'quote' ? initialPin.author ?? '' : '');
+  const [quoteThemeId, setQuoteThemeId] = useState<ThemeId>(initialPin?.type === 'quote' ? initialPin.themeId : activeThemeId);
+  const [linkUrl, setLinkUrl] = useState(initialPin?.type === 'link' ? initialPin.url : '');
+  const [linkTitle, setLinkTitle] = useState(initialPin?.type === 'link' ? initialPin.title : '');
+  const [linkPreviewImage, setLinkPreviewImage] = useState(initialPin?.type === 'link' ? initialPin.previewImage ?? '' : '');
+  const [caption, setCaption] = useState(initialPin?.caption ?? '');
   const [error, setError] = useState('');
   const [uploadStatus, setUploadStatus] = useState('');
 
@@ -635,13 +1043,13 @@ function AddPinModal({ activeThemeId, onAddPin, onClose }: AddPinModalProps) {
 
     try {
       if (type === 'image-url') {
-        onAddPin({ type, imageUrl, caption, alt: imageAlt });
+        onSave({ type, imageUrl, caption, alt: imageAlt });
       } else if (type === 'upload') {
-        onAddPin({ type, imageData: uploadData, fileName: uploadFileName, caption, alt: uploadAlt });
+        onSave({ type, imageData: uploadData, fileName: uploadFileName, caption, alt: uploadAlt });
       } else if (type === 'quote') {
-        onAddPin({ type, quote, author: quoteAuthor, caption, themeId: quoteThemeId });
+        onSave({ type, quote, author: quoteAuthor, caption, themeId: quoteThemeId });
       } else {
-        onAddPin({ type, url: linkUrl, title: linkTitle, previewImage: linkPreviewImage, caption });
+        onSave({ type, url: linkUrl, title: linkTitle, previewImage: linkPreviewImage, caption });
       }
 
       onClose();
@@ -652,11 +1060,11 @@ function AddPinModal({ activeThemeId, onAddPin, onClose }: AddPinModalProps) {
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="add-pin-title" onMouseDown={(event) => event.stopPropagation()}>
+      <section className="modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="pin-modal-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <span className="eyebrow">Create pin</span>
-            <h2 id="add-pin-title">Add something inspiring</h2>
+            <span className="eyebrow">{isEditing ? 'Edit pin' : 'Create pin'}</span>
+            <h2 id="pin-modal-title">{isEditing ? 'Update this inspiration' : 'Add something inspiring'}</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close modal">
             <XIcon />
@@ -700,7 +1108,7 @@ function AddPinModal({ activeThemeId, onAddPin, onClose }: AddPinModalProps) {
               <label className="upload-zone">
                 <UploadIcon />
                 <span>{uploadFileName || 'Choose an image from your device'}</span>
-                <small>Large images are resized before saving locally.</small>
+                <small>{isEditing ? 'Choose a new file to replace the saved image.' : 'Large images are resized before saving locally.'}</small>
                 <input type="file" accept="image/*" onChange={handleUploadChange} />
               </label>
               {uploadData ? <img className="upload-preview" src={uploadData} alt="Upload preview" /> : null}
@@ -740,7 +1148,7 @@ function AddPinModal({ activeThemeId, onAddPin, onClose }: AddPinModalProps) {
               </label>
               <label>
                 Title
-                <input value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Article, shop, playlist, resource..." required />
+                <input value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Article, shop, playlist, resource..." />
               </label>
               <label>
                 Optional preview image URL
@@ -761,8 +1169,8 @@ function AddPinModal({ activeThemeId, onAddPin, onClose }: AddPinModalProps) {
               Cancel
             </button>
             <button className="primary-button" type="submit">
-              <PlusIcon />
-              Save pin
+              {isEditing ? <EditIcon /> : <PlusIcon />}
+              {isEditing ? 'Save changes' : 'Save pin'}
             </button>
           </div>
         </form>

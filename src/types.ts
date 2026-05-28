@@ -1,5 +1,12 @@
 export type PinType = 'image-url' | 'upload' | 'quote' | 'link';
 
+export type PinSortMode =
+  | 'manual'
+  | 'created-desc'
+  | 'created-asc'
+  | 'updated-desc'
+  | 'updated-asc';
+
 export type ThemeId =
   | 'aurora'
   | 'rose'
@@ -22,6 +29,8 @@ interface BasePin {
   type: PinType;
   caption?: string;
   createdAt: string;
+  updatedAt: string;
+  isStarred: boolean;
 }
 
 export interface ImageUrlPin extends BasePin {
@@ -58,6 +67,8 @@ export interface Board {
   name: string;
   themeId: ThemeId;
   pins: Pin[];
+  isStarred: boolean;
+  pinSortMode: PinSortMode;
   createdAt: string;
   updatedAt: string;
 }

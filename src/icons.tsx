@@ -120,3 +120,35 @@ export const PaletteIcon = (props: IconProps) => (
     <path d="M14 8.5h.01" />
   </Icon>
 );
+
+export const EditIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 20h4.5L19 9.5a2.1 2.1 0 00-3-3L5.5 17 4 20z" />
+    <path d="M14.5 8L16 9.5" />
+  </Icon>
+);
+
+export const StarIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M12 3.8l2.5 5.1 5.6.8-4 4 1 5.6-5.1-2.7-5 2.7 1-5.6-4.1-4 5.6-.8L12 3.8z" />
+  </Icon>
+);
+
+export const DragHandleIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M8 6h.01" />
+    <path d="M16 6h.01" />
+    <path d="M8 12h.01" />
+    <path d="M16 12h.01" />
+    <path d="M8 18h.01" />
+    <path d="M16 18h.01" />
+  </Icon>
+);
+
+export const SortIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M6 7h12" />
+    <path d="M9 12h6" />
+    <path d="M11 17h2" />
+  </Icon>
+);

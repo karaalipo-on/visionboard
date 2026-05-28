@@ -1,6 +1,16 @@
-import type { Board, BoardTheme, ThemeId } from './types';
+import type { Board, BoardTheme, Pin, ThemeId } from './types';
 
 const now = () => new Date().toISOString();
+
+const pinBase = (id: string): Pick<Pin, 'id' | 'createdAt' | 'updatedAt' | 'isStarred'> => {
+  const timestamp = now();
+  return {
+    id,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    isStarred: false,
+  };
+};
 
 export const STORAGE_KEY = 'glass-vision-board:v1';
 
@@ -63,25 +73,25 @@ export const DEFAULT_BOARDS: Board[] = [
     id: 'board-vision',
     name: 'Vision Board',
     themeId: 'aurora',
+    isStarred: false,
+    pinSortMode: 'manual',
     createdAt: now(),
     updatedAt: now(),
     pins: [
       {
-        id: 'pin-vision-quote',
+        ...pinBase('pin-vision-quote'),
         type: 'quote',
         quote: 'Design a life that feels as good on the inside as it looks on the outside.',
         author: 'Daily intention',
         caption: 'Core energy for this season',
         themeId: 'aurora',
-        createdAt: now(),
       },
       {
-        id: 'pin-vision-link',
+        ...pinBase('pin-vision-link'),
         type: 'link',
         title: 'Portfolio inspiration',
         url: 'https://dribbble.com/',
         caption: 'A place to save visual ideas and creative direction.',
-        createdAt: now(),
       },
     ],
   },
@@ -89,16 +99,17 @@ export const DEFAULT_BOARDS: Board[] = [
     id: 'board-travel',
     name: 'Dream Travel',
     themeId: 'lagoon',
+    isStarred: false,
+    pinSortMode: 'manual',
     createdAt: now(),
     updatedAt: now(),
     pins: [
       {
-        id: 'pin-travel-photo',
+        ...pinBase('pin-travel-photo'),
         type: 'image-url',
         imageUrl: 'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=80',
         caption: 'Slow mornings, scenic walks, and beautiful light.',
         alt: 'A peaceful lakeside travel scene at golden hour',
-        createdAt: now(),
       },
     ],
   },
@@ -106,17 +117,18 @@ export const DEFAULT_BOARDS: Board[] = [
     id: 'board-career',
     name: 'Career Goals',
     themeId: 'rose',
+    isStarred: false,
+    pinSortMode: 'manual',
     createdAt: now(),
     updatedAt: now(),
     pins: [
       {
-        id: 'pin-career-quote',
+        ...pinBase('pin-career-quote'),
         type: 'quote',
         quote: 'Build proof, not pressure. Small wins compound.',
         author: 'Career mantra',
         caption: 'For focused work weeks.',
         themeId: 'rose',
-        createdAt: now(),
       },
     ],
   },

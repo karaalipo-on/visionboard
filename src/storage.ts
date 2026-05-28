@@ -1,8 +1,9 @@
 import { DEFAULT_BOARDS, STORAGE_KEY, THEMES, createId } from './data';
-import type { Board, Pin, PinType, ThemeId } from './types';
+import type { Board, Pin, PinSortMode, PinType, ThemeId } from './types';
 
 const themeIds = new Set(THEMES.map((theme) => theme.id));
 const pinTypes = new Set<PinType>(['image-url', 'upload', 'quote', 'link']);
+const pinSortModes = new Set<PinSortMode>(['manual', 'created-desc', 'created-asc', 'updated-desc', 'updated-asc']);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -10,13 +11,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const asString = (value: unknown, fallback = '') =>
   typeof value === 'string' ? value : fallback;
 
+const asBoolean = (value: unknown, fallback = false) =>
+  typeof value === 'boolean' ? value : fallback;
+
 const asThemeId = (value: unknown, fallback: ThemeId = 'aurora'): ThemeId => {
   return typeof value === 'string' && themeIds.has(value as ThemeId) ? (value as ThemeId) : fallback;
 };
 
-const asDateString = (value: unknown) => {
+const asPinSortMode = (value: unknown, fallback: PinSortMode = 'manual'): PinSortMode => {
+  return typeof value === 'string' && pinSortModes.has(value as PinSortMode)
+    ? (value as PinSortMode)
+    : fallback;
+};
+
+const asDateString = (value: unknown, fallback = new Date().toISOString()) => {
   const candidate = asString(value);
-  return Number.isNaN(Date.parse(candidate)) ? new Date().toISOString() : candidate;
+  return Number.isNaN(Date.parse(candidate)) ? fallback : candidate;
 };
 
 const normalizePin = (value: unknown): Pin | null => {
@@ -24,10 +34,15 @@ const normalizePin = (value: unknown): Pin | null => {
   const type = asString(value.type) as PinType;
   if (!pinTypes.has(type)) return null;
 
+  const createdAt = asDateString(value.createdAt);
+  const updatedAt = asDateString(value.updatedAt, createdAt);
+
   const base = {
     id: asString(value.id, createId('pin')),
     caption: asString(value.caption).trim() || undefined,
-    createdAt: asDateString(value.createdAt),
+    createdAt,
+    updatedAt,
+    isStarred: asBoolean(value.isStarred, false),
   };
 
   if (type === 'image-url') {
@@ -89,14 +104,17 @@ export const normalizeBoards = (value: unknown): Board[] | null => {
         : [];
 
       const name = asString(rawBoard.name, 'Untitled board').trim() || 'Untitled board';
+      const createdAt = asDateString(rawBoard.createdAt);
 
       return {
         id: asString(rawBoard.id, createId('board')),
         name,
         themeId: asThemeId(rawBoard.themeId),
         pins,
-        createdAt: asDateString(rawBoard.createdAt),
-        updatedAt: asDateString(rawBoard.updatedAt),
+        isStarred: asBoolean(rawBoard.isStarred, false),
+        pinSortMode: asPinSortMode(rawBoard.pinSortMode, 'manual'),
+        createdAt,
+        updatedAt: asDateString(rawBoard.updatedAt, createdAt),
       } satisfies Board;
     })
     .filter((board): board is Board => Boolean(board));
